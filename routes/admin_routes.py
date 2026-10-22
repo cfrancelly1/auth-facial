@@ -184,7 +184,33 @@ def revoke_api_key(key_id):
 
 @admin_bp.get("/api/users")
 def list_users():
-    users = User.query.order_by(User.fecha_creacion.desc()).all()
+    page = max(request.args.get("page", 1, type=int), 1)
+    per_page = min(max(request.args.get("per_page", 10, type=int), 1), 100)
+    term = (request.args.get("q") or "").strip()
+
+    # El embedding no se usa en el listado: se difiere para no leer el BLOB.
+    query = User.query.options(db.defer(User.embedding))
+
+    if term:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        query = query.filter(
+            db.or_(
+                User.nombre.ilike(pattern, escape="\\"),
+                User.documento.ilike(pattern, escape="\\")
+            )
+        )
+
+    total = query.count()
+    pages = max((total + per_page - 1) // per_page, 1)
+    page = min(page, pages)
+
+    users = (
+        query.order_by(User.fecha_creacion.desc(), User.id.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
     data = [
         {
@@ -197,7 +223,11 @@ def list_users():
         for user in users
     ]
 
-    return jsonify({"ok": True, "data": data})
+    return jsonify({
+        "ok": True,
+        "data": data,
+        "pagination": {"page": page, "per_page": per_page, "total": total, "pages": pages}
+    })
 
 
 @admin_bp.post("/api/users")

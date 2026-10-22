@@ -89,6 +89,21 @@
       margin-bottom: 10px;
     }
 
+    .pager {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+      font-size: 0.88rem;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .camera-off {
       opacity: 0.45;
       filter: grayscale(1);
@@ -166,6 +181,8 @@
         </form>
       </div>
 
+      <input id="usersSearch" type="search" placeholder="Buscar por nombre o documento" autocomplete="off" style="margin-bottom: 12px;">
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -181,6 +198,8 @@
           <tbody id="usersBody"></tbody>
         </table>
       </div>
+
+      <div id="usersPager" class="pager"></div>
 
       <div id="usersResult" class="result" style="margin-top: 14px;">Cargando usuarios...</div>
     </section>
@@ -200,6 +219,7 @@
 
       <div class="camera-toolbar">
         <button id="btnToggleCamera" class="btn" type="button">Apagar camara</button>
+        <button id="btnSwitchCamera" class="btn" type="button">Cambiar camara</button>
       </div>
 
       <form id="createUserForm" class="card">

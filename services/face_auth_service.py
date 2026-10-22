@@ -183,6 +183,17 @@ class FaceAuthService:
         rounded = np.round(normalized, 6)
         return hashlib.sha256(rounded.tobytes()).hexdigest()
 
+    def _similarity_scores(self, probe, blobs):
+        """Cosine similarity of a normalized probe against stored embeddings, in one matrix product."""
+        if not blobs:
+            return np.empty(0, dtype=np.float32)
+
+        matrix = np.stack([self.deserialize_embedding(blob) for blob in blobs])
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+
+        return (matrix / norms) @ probe
+
     @staticmethod
     def serialize_embedding(embedding):
         emb = np.asarray(embedding, dtype=np.float32)
@@ -243,16 +254,12 @@ class FaceAuthService:
             raise ValueError("Este rostro ya está registrado en el sistema.")
 
         # Defend against near-duplicate embeddings caused by small camera/noise changes.
-        existing_users = User.query.with_entities(User.id, User.embedding).all()
-        best_duplicate_score = -1.0
+        existing_blobs = [row.embedding for row in User.query.with_entities(User.embedding).all()]
+        duplicate_scores = self._similarity_scores(normalized_probe, existing_blobs)
+        best_duplicate_score = float(duplicate_scores.max()) if duplicate_scores.size else -1.0
 
-        for _, stored_blob in existing_users:
-            stored_embedding = self._normalize_embedding(self.deserialize_embedding(stored_blob))
-            score = float(np.dot(normalized_probe, stored_embedding))
-            best_duplicate_score = max(best_duplicate_score, score)
-
-            if score >= self.duplicate_face_threshold:
-                raise ValueError("Este rostro ya está registrado en el sistema.")
+        if best_duplicate_score >= self.duplicate_face_threshold:
+            raise ValueError("Este rostro ya está registrado en el sistema.")
 
         # Additional safeguard: if the face is clearly recognized as existing,
         # block registration even when the strict duplicate threshold is not met.
@@ -305,7 +312,9 @@ class FaceAuthService:
 
         probe_embedding = self._normalize_embedding(self.recognizer.get_embedding(image))
 
-        users = User.query.all()
+        users = User.query.with_entities(
+            User.id, User.nombre, User.documento, User.face_hash, User.embedding
+        ).all()
 
         if len(users) == 0:
             self._store_login_attempt(None, False, 0.0)
@@ -314,18 +323,10 @@ class FaceAuthService:
                 "message": "No hay usuarios registrados."
             }
 
-        best_user = None
-        best_score = -1.0
-
-        for user in users:
-            user_embedding = self.deserialize_embedding(user.embedding)
-            user_embedding = self._normalize_embedding(user_embedding)
-
-            score = float(np.dot(probe_embedding, user_embedding))
-
-            if score > best_score:
-                best_score = score
-                best_user = user
+        scores = self._similarity_scores(probe_embedding, [user.embedding for user in users])
+        best_index = int(np.argmax(scores))
+        best_user = users[best_index]
+        best_score = float(scores[best_index])
 
         is_authenticated = best_user is not None and best_score >= self.similarity_threshold
         self._store_login_attempt(best_user.id if is_authenticated else None, is_authenticated, best_score)

@@ -17,6 +17,7 @@ const openerOrigin = pluginConfig.openerOrigin || "*";
 const pluginQueryMode = new URLSearchParams(window.location.search).get("plugin") === "1";
 
 let stream = null;
+let facingMode = "user";
 let activeMode = "register";
 let loopTimer = null;
 let requestInFlight = false;
@@ -110,12 +111,36 @@ function setMode(mode) {
   setResult("Listo para comenzar.");
 }
 
+async function switchCamera() {
+  const previousMode = facingMode;
+  facingMode = facingMode === "user" ? "environment" : "user";
+
+  if (stream) {
+    stream.getTracks().forEach((track) => track.stop());
+    stream = null;
+  }
+
+  try {
+    await startCamera();
+  } catch (error) {
+    facingMode = previousMode;
+    await startCamera();
+    setResult("No se pudo cambiar de cámara.", "bad");
+  }
+}
+
+document.getElementById("btnSwitchCamera").addEventListener("click", switchCamera);
+
 async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("La camara requiere HTTPS o localhost. Abre el sitio con una conexion segura.");
+  }
+
   streamStatus.textContent = "Solicitando permisos de cámara...";
 
   stream = await navigator.mediaDevices.getUserMedia({
     video: {
-      facingMode: "user",
+      facingMode: { ideal: facingMode },
       width: { ideal: 1280 },
       height: { ideal: 720 }
     },

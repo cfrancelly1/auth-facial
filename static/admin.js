@@ -6,6 +6,9 @@ const streamStatus = document.getElementById("streamStatus");
 const createUserForm = document.getElementById("createUserForm");
 const btnCreate = document.getElementById("btnCreate");
 const btnToggleCamera = document.getElementById("btnToggleCamera");
+const btnSwitchCamera = document.getElementById("btnSwitchCamera");
+const usersSearch = document.getElementById("usersSearch");
+const usersPager = document.getElementById("usersPager");
 const btnAuthenticate = document.getElementById("btnAuthenticate");
 const authResult = document.getElementById("authResult");
 const apiKeyForm = document.getElementById("apiKeyForm");
@@ -20,6 +23,11 @@ const scopeAdminLogin = document.getElementById("scopeAdminLogin");
 const scopePluginToken = document.getElementById("scopePluginToken");
 
 let stream = null;
+let facingMode = "user";
+let usersPage = 1;
+let usersSearchTerm = "";
+let usersSearchTimer = null;
+const USERS_PER_PAGE = 10;
 let createLoopTimer = null;
 let createRequestInFlight = false;
 let authLoopTimer = null;
@@ -48,11 +56,15 @@ async function startCamera() {
     return;
   }
 
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error("La camara requiere HTTPS o localhost. Abre el sitio con una conexion segura.");
+  }
+
   streamStatus.textContent = "Solicitando permisos de camara...";
 
   stream = await navigator.mediaDevices.getUserMedia({
     video: {
-      facingMode: "user",
+      facingMode: { ideal: facingMode },
       width: { ideal: 1280 },
       height: { ideal: 720 }
     },
@@ -62,6 +74,29 @@ async function startCamera() {
   camera.srcObject = stream;
   await camera.play();
   updateCameraUi(true);
+}
+
+async function switchCamera() {
+  const previousMode = facingMode;
+  facingMode = facingMode === "user" ? "environment" : "user";
+
+  if (!stream) {
+    return;
+  }
+
+  stopCamera();
+
+  try {
+    await startCamera();
+  } catch (error) {
+    facingMode = previousMode;
+    try {
+      await startCamera();
+    } catch {
+      updateCameraUi(false);
+    }
+    setResult(`No se pudo cambiar de camara: ${error.message}`, "bad");
+  }
 }
 
 function stopCamera() {
@@ -81,6 +116,7 @@ function updateCameraUi(isOn) {
   btnToggleCamera.textContent = isOn ? "Apagar camara" : "Encender camara";
   btnCreate.disabled = !isOn;
   btnAuthenticate.disabled = !isOn;
+  btnSwitchCamera.disabled = !isOn;
   camera.classList.toggle("camera-off", !isOn);
 }
 
@@ -140,17 +176,33 @@ function renderUsers(users) {
     .join("");
 }
 
+function renderPager(pagination) {
+  const { page, pages, total } = pagination;
+
+  usersPager.innerHTML = `
+    <button type="button" class="btn" data-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>Anterior</button>
+    <span>Pagina ${page} de ${pages} (${total} usuarios)</span>
+    <button type="button" class="btn" data-page="${page + 1}" ${page >= pages ? "disabled" : ""}>Siguiente</button>`;
+}
+
 async function loadUsers() {
   try {
-    const response = await fetch("/admin/api/users");
+    const params = new URLSearchParams({
+      page: usersPage,
+      per_page: USERS_PER_PAGE,
+      q: usersSearchTerm
+    });
+    const response = await fetch(`/admin/api/users?${params}`);
     const body = await response.json();
 
     if (!response.ok || !body.ok) {
       throw new Error(body.error || "No se pudieron cargar los usuarios.");
     }
 
+    usersPage = body.pagination.page;
     renderUsers(body.data || []);
-    setResult(`Usuarios cargados: ${(body.data || []).length}`, "ok");
+    renderPager(body.pagination);
+    setResult(`Usuarios encontrados: ${body.pagination.total}`, "ok");
   } catch (error) {
     setResult(error.message, "bad");
   }
@@ -456,6 +508,27 @@ btnAuthenticate.addEventListener("click", async () => {
   btnAuthenticate.disabled = true;
   startAuthLoop();
 });
+
+usersSearch.addEventListener("input", () => {
+  clearTimeout(usersSearchTimer);
+  usersSearchTimer = setTimeout(() => {
+    usersSearchTerm = usersSearch.value.trim();
+    usersPage = 1;
+    loadUsers();
+  }, 300);
+});
+
+usersPager.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-page]");
+  if (!target || target.disabled) {
+    return;
+  }
+
+  usersPage = Number(target.getAttribute("data-page"));
+  loadUsers();
+});
+
+btnSwitchCamera.addEventListener("click", switchCamera);
 
 usersBody.addEventListener("click", async (event) => {
   const editId = event.target.getAttribute("data-edit");
