@@ -153,9 +153,17 @@ async function startCamera() {
   streamStatus.textContent = "Streaming activo";
 }
 
-function captureFrameDataURL() {
-  const width = camera.videoWidth || 640;
-  const height = camera.videoHeight || 480;
+function captureFrameDataURL(maxSide = null) {
+  let width = camera.videoWidth || 640;
+  let height = camera.videoHeight || 480;
+
+  // Reduce el fotograma (autenticación): el detector ya trabaja a 640 px, así que
+  // enviar 1280x720 solo agrega subida y decodificación.
+  if (maxSide && Math.max(width, height) > maxSide) {
+    const scale = maxSide / Math.max(width, height);
+    width = Math.round(width * scale);
+    height = Math.round(height * scale);
+  }
 
   canvas.width = width;
   canvas.height = height;
@@ -166,7 +174,7 @@ function captureFrameDataURL() {
   return canvas.toDataURL("image/jpeg", 0.82);
 }
 
-async function sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError) {
+async function sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError, maxSide = null) {
   if (requestInFlight) {
     return;
   }
@@ -178,7 +186,7 @@ async function sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError)
   requestInFlight = true;
 
   try {
-    const frame = captureFrameDataURL();
+    const frame = captureFrameDataURL(maxSide);
     const payload = payloadBuilder(frame);
 
     const response = await fetch(endpoint, {
@@ -222,14 +230,14 @@ async function sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError)
   }
 }
 
-function startLoop(endpoint, payloadBuilder, onSuccess, shouldStopOnError = null) {
+function startLoop(endpoint, payloadBuilder, onSuccess, shouldStopOnError = null, maxSide = null) {
   stopLoop();
   rateLimitedUntil = 0;
 
   setResult("Procesando stream en vivo... mantente frente a la cámara.");
 
   loopTimer = setInterval(() => {
-    sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError);
+    sendFrame(endpoint, payloadBuilder, onSuccess, shouldStopOnError, maxSide);
   }, 850);
 }
 
@@ -271,12 +279,22 @@ registerForm.addEventListener("submit", (event) => {
   );
 });
 
+function newLivenessSession() {
+  // Identificador aleatorio por intento: aísla la verificación de vida de cada persona.
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return Array.from(window.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 btnStartAuth.addEventListener("click", () => {
   btnStartAuth.disabled = true;
 
+  const livenessSession = newLivenessSession();
+
   startLoop(
     "/api/stream/authenticate",
-    (frame) => ({ frame }),
+    (frame) => ({ frame, liveness_session: livenessSession }),
     (data) => {
       const user = data?.user || {};
       setResult(
@@ -298,7 +316,9 @@ btnStartAuth.addEventListener("click", () => {
       }
 
       btnStartAuth.disabled = false;
-    }
+    },
+    null,
+    800
   );
 });
 

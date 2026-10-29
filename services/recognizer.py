@@ -2,14 +2,19 @@ import cv2
 import numpy as np
 
 from insightface.app import FaceAnalysis
+from insightface.app.common import Face
 
 
 class FaceRecognizer:
 
     def __init__(self):
 
+        # buffalo_l trae también landmark 3D/2D y edad/género, que aquí no se usan:
+        # FaceAnalysis.get() los ejecutaría en cada fotograma. Los puntos clave (kps)
+        # los entrega el detector, y el embedding el modelo de reconocimiento.
         self.app = FaceAnalysis(
-            name="buffalo_l"
+            name="buffalo_l",
+            allowed_modules=["detection", "recognition"]
         )
 
         try:
@@ -24,7 +29,24 @@ class FaceRecognizer:
                 det_size=(640, 640)
             )
 
-    def _get_single_face(self, image):
+    def _get_single_face(self, image, with_embedding=True):
+
+        if not with_embedding:
+            # Solo detección (bbox + 5 puntos clave): suficiente para validar
+            # obstrucciones y liveness sin correr el modelo de reconocimiento.
+            bboxes, kpss = self.app.det_model.detect(image, max_num=0, metric="default")
+
+            if bboxes.shape[0] == 0:
+                raise ValueError("No se detectó ningún rostro.")
+
+            if bboxes.shape[0] > 1:
+                raise ValueError("Se detectaron múltiples rostros.")
+
+            return Face(
+                bbox=bboxes[0, 0:4],
+                kps=kpss[0] if kpss is not None else None,
+                det_score=bboxes[0, 4]
+            )
 
         faces = self.app.get(image)
 
@@ -59,7 +81,7 @@ class FaceRecognizer:
         return float(lap.var())
 
     def validate_unobstructed_face(self, image):
-        face = self._get_single_face(image)
+        face = self._get_single_face(image, with_embedding=False)
 
         kps = getattr(face, "kps", None)
         if kps is None or len(kps) < 5:
@@ -104,7 +126,7 @@ class FaceRecognizer:
         return len(reasons) == 0, reasons
 
     def get_eye_texture_score(self, image):
-        face = self._get_single_face(image)
+        face = self._get_single_face(image, with_embedding=False)
 
         kps = getattr(face, "kps", None)
         if kps is None or len(kps) < 2:
@@ -126,7 +148,7 @@ class FaceRecognizer:
         return (left_eye_score + right_eye_score) / 2.0
 
     def get_liveness_metrics(self, image):
-        face = self._get_single_face(image)
+        face = self._get_single_face(image, with_embedding=False)
 
         kps = getattr(face, "kps", None)
         if kps is None or len(kps) < 3:

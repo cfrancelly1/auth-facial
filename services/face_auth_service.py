@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hashlib
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,16 @@ from sqlalchemy.exc import IntegrityError
 from database import db
 from models import LoginHistory, User
 from services.recognizer import FaceRecognizer
+
+
+# Log de tiempos por fotograma de autenticación (solo medición, no altera el flujo).
+timing_log = logging.getLogger("face_auth.timing")
+if not timing_log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    timing_log.addHandler(_handler)
+    timing_log.setLevel(logging.INFO)
+    timing_log.propagate = False
 
 
 class FaceAuthService:
@@ -34,6 +45,7 @@ class FaceAuthService:
         state = self._liveness_states.get(liveness_key)
 
         if state is None or now - state["updated_at"] > 20.0:
+            self._purge_liveness_states(now)
             state = {
                 "open_reference": 0.0,
                 "phase": "collect_open",
@@ -135,6 +147,12 @@ class FaceAuthService:
             return False
 
         return False
+
+    def _purge_liveness_states(self, now):
+        # Los estados abandonados (empleado que cerró la ventana) nunca se
+        # reutilizan: sin purga se acumularían con una clave por sesión.
+        for key in [k for k, v in list(self._liveness_states.items()) if now - v["updated_at"] > 60.0]:
+            self._liveness_states.pop(key, None)
 
     def _clear_liveness_state(self, liveness_key):
         if liveness_key:
@@ -305,16 +323,48 @@ class FaceAuthService:
         }
 
     def authenticate(self, frame_data, liveness_key=None):
-        image = self.decode_frame(frame_data)
+        t0 = time.perf_counter()
+        marks = {}
+        result = "error"
 
-        if not self._check_blink_liveness(image, liveness_key):
-            raise ValueError("Verificacion de vida pendiente: parpadea o mueve ligeramente el rostro frente a la camara.")
+        def mark(name, since):
+            now = time.perf_counter()
+            marks[name] = int((now - since) * 1000)
+            return now
 
+        try:
+            image = self.decode_frame(frame_data)
+            t = mark("decode", t0)
+            marks["img"] = f"{image.shape[1]}x{image.shape[0]}"
+            marks["frame_kb"] = len(frame_data) // 1024
+
+            liveness_ok = self._check_blink_liveness(image, liveness_key)
+            state = self._liveness_states.get(liveness_key) or {}
+            marks["frames"] = state.get("frame_count", "-")
+            t = mark("liveness", t)
+
+            if not liveness_ok:
+                result = "liveness_pendiente"
+                raise ValueError("Verificacion de vida pendiente: parpadea o mueve ligeramente el rostro frente a la camara.")
+
+            return self._authenticate_after_liveness(image, liveness_key, marks, mark, t, lambda r: marks.__setitem__("result", r))
+        finally:
+            marks.setdefault("result", result)
+            timing_log.info(
+                "[AUTH-TIEMPOS] total=%dms %s",
+                int((time.perf_counter() - t0) * 1000),
+                " ".join(f"{k}={v}" for k, v in marks.items())
+            )
+
+    def _authenticate_after_liveness(self, image, liveness_key, marks, mark, t, set_result):
         probe_embedding = self._normalize_embedding(self.recognizer.get_embedding(image))
+        t = mark("embedding", t)
 
         users = User.query.with_entities(
             User.id, User.nombre, User.documento, User.face_hash, User.embedding
         ).all()
+        marks["usuarios"] = len(users)
+        t = mark("db_usuarios", t)
 
         if len(users) == 0:
             self._store_login_attempt(None, False, 0.0)
@@ -327,9 +377,12 @@ class FaceAuthService:
         best_index = int(np.argmax(scores))
         best_user = users[best_index]
         best_score = float(scores[best_index])
+        t = mark("similitud", t)
 
         is_authenticated = best_user is not None and best_score >= self.similarity_threshold
         self._store_login_attempt(best_user.id if is_authenticated else None, is_authenticated, best_score)
+        t = mark("db_guardar_intento", t)
+        set_result("ok" if is_authenticated else "no_reconocido")
 
         if not is_authenticated:
             return {

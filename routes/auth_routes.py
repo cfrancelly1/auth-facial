@@ -1,5 +1,6 @@
 import hmac
 import os
+import re
 from urllib.parse import urlparse
 
 from flask import Blueprint, current_app, jsonify, redirect, render_template, request, session, url_for
@@ -18,6 +19,20 @@ rate_limiter = InMemoryRateLimiter()
 api_key_service = ApiKeyService()
 
 
+_LIVENESS_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+
+def _liveness_session_id(payload):
+    """
+    Identificador aleatorio que genera el navegador por cada intento de autenticación.
+    Aísla el estado de verificación de vida y el límite de solicitudes de cada persona:
+    con la IP como clave, todos los empleados de una misma red (wifi de la obra) los
+    compartirían. Si no viene (cliente antiguo) se cae a la IP como antes.
+    """
+    session_id = str((payload or {}).get("liveness_session") or "")
+    return session_id if _LIVENESS_SESSION_PATTERN.match(session_id) else None
+
+
 def _error_response(message, status_code):
     return jsonify({"ok": False, "error": message}), status_code
 
@@ -32,8 +47,8 @@ def _remote_ip():
     return forwarded or (request.remote_addr or "unknown")
 
 
-def _enforce_rate_limit(bucket_name, per_window):
-    key = f"{bucket_name}:{_remote_ip()}"
+def _enforce_rate_limit(bucket_name, per_window, session_id=None):
+    key = f"{bucket_name}:{session_id}" if session_id else f"{bucket_name}:{_remote_ip()}"
     allowed, retry_after = rate_limiter.allow(
         key=key,
         limit=per_window,
@@ -138,7 +153,7 @@ def index():
 def issue_plugin_token():
     limited = _enforce_rate_limit(
         bucket_name="token",
-        per_window=current_app.config.get("RATE_LIMIT_TOKEN_PER_WINDOW", 20)
+        per_window=current_app.config.get("RATE_LIMIT_TOKEN_PER_WINDOW", 1500)
     )
     if limited is not None:
         return limited
@@ -226,9 +241,11 @@ def stream_register():
 
 @auth_bp.post("/api/stream/authenticate")
 def stream_authenticate():
+    # Tope por IP: solo frena abusos. Muchos empleados comparten la IP de la obra, así que
+    # es alto; el límite fino es por sesión (una persona = un navegador).
     limited = _enforce_rate_limit(
-        bucket_name="authenticate",
-        per_window=current_app.config.get("RATE_LIMIT_AUTH_PER_WINDOW", 180)
+        bucket_name="authenticate-ip",
+        per_window=current_app.config.get("RATE_LIMIT_AUTH_PER_WINDOW", 30000)
     )
     if limited is not None:
         return limited
@@ -239,11 +256,21 @@ def stream_authenticate():
         return _error_response(str(error), 400)
 
     payload = request.get_json(silent=True) or {}
+    session_id = _liveness_session_id(payload)
+
+    if session_id:
+        limited = _enforce_rate_limit(
+            bucket_name="authenticate-session",
+            per_window=current_app.config.get("RATE_LIMIT_AUTH_SESSION_PER_WINDOW", 150),
+            session_id=session_id
+        )
+        if limited is not None:
+            return limited
 
     try:
         result = face_auth_service.authenticate(
             frame_data=payload.get("frame", ""),
-            liveness_key=f"authenticate:{_remote_ip()}"
+            liveness_key=f"authenticate:{session_id or _remote_ip()}"
         )
 
         status_code = 200 if result.get("authenticated") else 401
